@@ -302,7 +302,7 @@ class XmlSecurityTest < Minitest::Test
       let (:response) { OneLogin::RubySaml::Response.new(fixture(:starfield_response)) }
 
       before do
-        response.settings = OneLogin::RubySaml::Settings.new( :idp_cert_fingerprint => "8D:BA:53:8E:A3:B6:F9:F1:69:6C:BB:D9:D8:BD:41:B3:AC:4F:9D:4D")
+        response.settings = OneLogin::RubySaml::Settings.new(:idp_cert_fingerprint => "8D:BA:53:8E:A3:B6:F9:F1:69:6C:BB:D9:D8:BD:41:B3:AC:4F:9D:4D")
       end
 
       it "be able to validate a good response" do
@@ -320,10 +320,10 @@ class XmlSecurityTest < Minitest::Test
           time_2 = 'Tue Nov 20 17:55:00 UTC 2012 < Wed Nov 28 17:53:45 UTC 2012'
 
           errors = [time_1, time_2].map do |time|
-            "Current time is earlier than NotBefore condition (#{time})"
+            "Current time is earlier than NotBefore condition (#{time} - 1s)"
           end
 
-          assert_predicate response.errors & errors, :any?
+          assert_predicate(response.errors & errors, :any?)
         end
       end
 
@@ -331,8 +331,8 @@ class XmlSecurityTest < Minitest::Test
         Timecop.freeze Time.parse('2012-11-30 17:55:00 UTC') do
           assert !response.is_valid?
 
-          contains_expected_error = response.errors.include? "Current time is on or after NotOnOrAfter condition (2012-11-30 17:55:00 UTC >= 2012-11-28 18:33:45 UTC)"
-          contains_expected_error ||= response.errors.include? "Current time is on or after NotOnOrAfter condition (Fri Nov 30 17:55:00 UTC 2012 >= Wed Nov 28 18:33:45 UTC 2012)"
+          contains_expected_error = response.errors.include?("Current time is on or after NotOnOrAfter condition (2012-11-30 17:55:00 UTC >= 2012-11-28 18:33:45 UTC + 1s)")
+          contains_expected_error ||= response.errors.include?("Current time is on or after NotOnOrAfter condition (Fri Nov 30 17:55:00 UTC 2012 >= Wed Nov 28 18:33:45 UTC 2012 + 1s)")
           assert contains_expected_error
         end
       end
@@ -387,9 +387,9 @@ class XmlSecurityTest < Minitest::Test
         let(:document) { OneLogin::RubySaml::Response.new(document_data) }
         let(:fingerprint) { '4b68c453c7d994aad9025c99d5efcf566287fe8d' }
 
-        it 'is valid, but fails to retrieve information' do
+        it 'is valid, but the unsigned information is ignored in favour of the signed information' do
           assert document.document.validate_document(fingerprint, true), 'Document should be valid'
-          assert document.name_id.nil?, 'Document should expose only signed, valid details'
+          assert_equal 'someone@example.org', document.name_id, 'Document should expose only signed, valid details'
         end
       end
     end
@@ -402,13 +402,12 @@ class XmlSecurityTest < Minitest::Test
 
       describe 'with invalid document ' do
         describe 'when certificate is invalid' do
-          let(:document_data) { read_response('response_with_signed_message_and_assertion.xml')
-            .sub(/<ds:X509Certificate>.*<\/ds:X509Certificate>/, "<ds:X509Certificate>invalid<\/ds:X509Certificate>") }
           let(:document) { OneLogin::RubySaml::Response.new(document_data).document }
-          let(:idp_cert) { OpenSSL::X509::Certificate.new(ruby_saml_cert_text) }
 
           it 'is invalid' do
-            refute document.validate_document_with_cert(idp_cert), 'Document should be invalid'
+            wrong_document_data = document_data.sub(/<ds:X509Certificate>.*<\/ds:X509Certificate>/, "<ds:X509Certificate>invalid<\/ds:X509Certificate>")
+            wrong_document = OneLogin::RubySaml::Response.new(wrong_document_data).document
+            refute wrong_document.validate_document_with_cert(idp_cert), 'Document should be invalid'
           end
         end
       end

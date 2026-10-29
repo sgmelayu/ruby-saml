@@ -20,7 +20,7 @@ module OneLogin
         end
 
         config.each do |k,v|
-          acc = "#{k.to_s}=".to_sym
+          acc = "#{k}=".to_sym
           if respond_to? acc
             value = v.is_a?(Hash) ? v.dup : v
             send(acc, value)
@@ -31,9 +31,8 @@ module OneLogin
 
       # IdP Data
       attr_accessor :idp_entity_id
-
-      attr_accessor :idp_sso_service_url
-      attr_accessor :idp_slo_service_url
+      attr_writer   :idp_sso_service_url
+      attr_writer   :idp_slo_service_url
       attr_accessor :idp_slo_response_service_url
       attr_accessor :idp_cert
       attr_accessor :idp_cert_fingerprint
@@ -43,8 +42,10 @@ module OneLogin
       attr_accessor :idp_name_qualifier
       attr_accessor :valid_until
       # SP Data
+      attr_writer   :sp_entity_id
       attr_accessor :assertion_consumer_service_url
-      attr_accessor :assertion_consumer_service_binding
+      attr_reader   :assertion_consumer_service_binding
+      attr_writer   :single_logout_service_url
       attr_accessor :sp_name_qualifier
       attr_accessor :name_identifier_format
       attr_accessor :name_identifier_value
@@ -53,13 +54,15 @@ module OneLogin
       attr_accessor :compress_request
       attr_accessor :compress_response
       attr_accessor :double_quote_xml_attribute_values
+      attr_accessor :message_max_bytesize
+      attr_accessor :check_malformed_doc
       attr_accessor :passive
-      attr_accessor :protocol_binding
+      attr_reader   :protocol_binding
       attr_accessor :attributes_index
       attr_accessor :force_authn
       attr_accessor :certificate
-      attr_accessor :certificate_new
       attr_accessor :private_key
+      attr_accessor :sp_cert_multi
       attr_accessor :authn_context
       attr_accessor :authn_context_comparison
       attr_accessor :authn_context_decl_ref
@@ -67,9 +70,10 @@ module OneLogin
       # Work-flow
       attr_accessor :security
       attr_accessor :soft
-      # Compability
+      # Deprecated
+      attr_accessor :certificate_new
       attr_accessor :assertion_consumer_logout_service_url
-      attr_accessor :assertion_consumer_logout_service_binding
+      attr_reader   :assertion_consumer_logout_service_binding
       attr_accessor :issuer
       attr_accessor :idp_sso_target_url
       attr_accessor :idp_slo_target_url
@@ -77,94 +81,89 @@ module OneLogin
       # @return [String] IdP Single Sign On Service URL
       #
       def idp_sso_service_url
-        val = nil
-        if @idp_sso_service_url.nil?
-          if @idp_sso_target_url
-            val = @idp_sso_target_url
-          end
-        else
-          val = @idp_sso_service_url
-        end
-        val
+        @idp_sso_service_url || @idp_sso_target_url
       end
 
       # @return [String] IdP Single Logout Service URL
       #
       def idp_slo_service_url
-        val = nil
-        if @idp_slo_service_url.nil?
-          if @idp_slo_target_url
-            val = @idp_slo_target_url
-          end
-        else
-          val = @idp_slo_service_url
-        end
-        val
+        @idp_slo_service_url || @idp_slo_target_url
+      end
+
+      # @return [String] IdP Single Sign On Service Binding
+      #
+      def idp_sso_service_binding
+        @idp_sso_service_binding || idp_binding_from_embed_sign
+      end
+
+      # Setter for IdP Single Sign On Service Binding
+      # @param value [String, Symbol].
+      #
+      def idp_sso_service_binding=(value)
+        @idp_sso_service_binding = get_binding(value)
+      end
+
+      # @return [String] IdP Single Logout Service Binding
+      #
+      def idp_slo_service_binding
+        @idp_slo_service_binding || idp_binding_from_embed_sign
+      end
+
+      # Setter for IdP Single Logout Service Binding
+      # @param value [String, Symbol].
+      #
+      def idp_slo_service_binding=(value)
+        @idp_slo_service_binding = get_binding(value)
       end
 
       # @return [String] SP Entity ID
       #
       def sp_entity_id
-        val = nil
-        if @sp_entity_id.nil?
-          if @issuer
-            val = @issuer
-          end
-        else
-          val = @sp_entity_id
-        end
-        val
+        @sp_entity_id || @issuer
       end
 
-      # Setter for SP Entity ID.
-      # @param val [String].
+      # Setter for SP Protocol Binding
+      # @param value [String, Symbol].
       #
-      def sp_entity_id=(val)
-        @sp_entity_id = val
+      def protocol_binding=(value)
+        @protocol_binding = get_binding(value)
+      end
+
+      # Setter for SP Assertion Consumer Service Binding
+      # @param value [String, Symbol].
+      #
+      def assertion_consumer_service_binding=(value)
+        @assertion_consumer_service_binding = get_binding(value)
       end
 
       # @return [String] Single Logout Service URL.
       #
       def single_logout_service_url
-        val = nil
-        if @single_logout_service_url.nil?
-          if @assertion_consumer_logout_service_url
-            val = @assertion_consumer_logout_service_url
-          end
-        else
-          val = @single_logout_service_url
-        end
-        val
-      end
-
-      # Setter for the Single Logout Service URL.
-      # @param url [String].
-      #
-      def single_logout_service_url=(url)
-        @single_logout_service_url = url
+        @single_logout_service_url || @assertion_consumer_logout_service_url
       end
 
       # @return [String] Single Logout Service Binding.
       #
       def single_logout_service_binding
-        val = nil
-        if @single_logout_service_binding.nil?
-          if @assertion_consumer_logout_service_binding
-            val = @assertion_consumer_logout_service_binding
-          end
-        else
-          val = @single_logout_service_binding
-        end
-        val
+        @single_logout_service_binding || @assertion_consumer_logout_service_binding
       end
 
       # Setter for Single Logout Service Binding.
       #
       # (Currently we only support "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect")
-      # @param url [String]
+      # @param value [String, Symbol]
       #
-      def single_logout_service_binding=(url)
-        @single_logout_service_binding = url
+      def single_logout_service_binding=(value)
+        @single_logout_service_binding = get_binding(value)
+      end
+
+      # @deprecated Setter for legacy Single Logout Service Binding parameter.
+      #
+      # (Currently we only support "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect")
+      # @param value [String, Symbol]
+      #
+      def assertion_consumer_logout_service_binding=(value)
+        @assertion_consumer_logout_service_binding = get_binding(value)
       end
 
       # Calculates the fingerprint of the IdP x509 certificate.
@@ -180,13 +179,10 @@ module OneLogin
         end
       end
 
-      # @return [OpenSSL::X509::Certificate|nil] Build the IdP certificate from the settings (previously format it)
+      # @return [OpenSSL::X509::Certificate|nil] Build the IdP certificate from the settings (previously formatting it)
       #
       def get_idp_cert
-        return nil if idp_cert.nil? || idp_cert.empty?
-
-        formatted_cert = OneLogin::RubySaml::Utils.format_cert(idp_cert)
-        OpenSSL::X509::Certificate.new(formatted_cert)
+        OneLogin::RubySaml::Utils.build_cert_object(idp_cert)
       end
 
       # @return [Hash with 2 arrays of OpenSSL::X509::Certificate] Build multiple IdP certificates from the settings.
@@ -194,72 +190,101 @@ module OneLogin
       def get_idp_cert_multi
         return nil if idp_cert_multi.nil? || idp_cert_multi.empty?
 
-        raise ArgumentError.new("Invalid value for idp_cert_multi") if not idp_cert_multi.is_a?(Hash)
+        raise ArgumentError.new("Invalid value for idp_cert_multi") unless idp_cert_multi.is_a?(Hash)
 
         certs = {:signing => [], :encryption => [] }
 
-        if idp_cert_multi.key?(:signing) and not idp_cert_multi[:signing].empty?
-          idp_cert_multi[:signing].each do |idp_cert|
-            formatted_cert = OneLogin::RubySaml::Utils.format_cert(idp_cert)
-            certs[:signing].push(OpenSSL::X509::Certificate.new(formatted_cert))
-          end
-        end
+        [:signing, :encryption].each do |type|
+          certs_for_type = idp_cert_multi[type] || idp_cert_multi[type.to_s]
+          next if !certs_for_type || certs_for_type.empty?
 
-        if idp_cert_multi.key?(:encryption) and not idp_cert_multi[:encryption].empty?
-          idp_cert_multi[:encryption].each do |idp_cert|
-            formatted_cert = OneLogin::RubySaml::Utils.format_cert(idp_cert)
-            certs[:encryption].push(OpenSSL::X509::Certificate.new(formatted_cert))
+          certs_for_type.each do |idp_cert|
+            certs[type].push(OneLogin::RubySaml::Utils.build_cert_object(idp_cert))
           end
         end
 
         certs
       end
 
-      # @return [OpenSSL::X509::Certificate|nil] Build the SP certificate from the settings (previously format it)
-      #
-      def get_sp_cert
-        return nil if certificate.nil? || certificate.empty?
+      # @return [Hash<Symbol, Array<Array<OpenSSL::X509::Certificate, OpenSSL::PKey::RSA>>>]
+      #   Build the SP certificates and private keys from the settings. If
+      #   check_sp_cert_expiration is true, only returns certificates and private keys
+      #   that are not expired.
+      def get_sp_certs
+        certs = get_all_sp_certs
+        return certs unless security[:check_sp_cert_expiration]
 
-        formatted_cert = OneLogin::RubySaml::Utils.format_cert(certificate)
-        cert = OpenSSL::X509::Certificate.new(formatted_cert)
+        active_certs = { signing: [], encryption: [] }
+        certs.each do |use, pairs|
+          next if pairs.empty?
 
-        if security[:check_sp_cert_expiration]
-          if OneLogin::RubySaml::Utils.is_cert_expired(cert)
-            raise OneLogin::RubySaml::ValidationError.new("The SP certificate expired.")
-          end
+          pairs = pairs.select { |cert, _| !cert || OneLogin::RubySaml::Utils.is_cert_active(cert) }
+          raise OneLogin::RubySaml::ValidationError.new("The SP certificate expired.") if pairs.empty?
+
+          active_certs[use] = pairs.freeze
         end
-
-        cert
+        active_certs.freeze
       end
 
-      # @return [OpenSSL::X509::Certificate|nil] Build the New SP certificate from the settings (previously format it)
+      # @return [Array<OpenSSL::X509::Certificate, OpenSSL::PKey::RSA>]
+      #   The SP signing certificate and private key.
+      def get_sp_signing_pair
+        get_sp_certs[:signing].first
+      end
+
+      # @return [OpenSSL::X509::Certificate] The SP signing certificate.
+      # @deprecated Use get_sp_signing_pair or get_sp_certs instead.
+      def get_sp_cert
+        node = get_sp_signing_pair
+        node[0] if node
+      end
+
+      # @return [OpenSSL::PKey::RSA] The SP signing key.
+      def get_sp_signing_key
+        node = get_sp_signing_pair
+        node[1] if node
+      end
+
+      # @deprecated Use get_sp_signing_key or get_sp_certs instead.
+      alias_method :get_sp_key, :get_sp_signing_key
+
+      # @return [Array<OpenSSL::PKey::RSA>] The SP decryption keys.
+      def get_sp_decryption_keys
+        ary = get_sp_certs[:encryption].map { |pair| pair[1] }
+        ary.compact!
+        ary.uniq!(&:to_pem)
+        ary.freeze
+      end
+
+      # @return [OpenSSL::X509::Certificate|nil] Build the New SP certificate from the settings.
       #
+      # @deprecated Use get_sp_certs instead
       def get_sp_cert_new
-        return nil if certificate_new.nil? || certificate_new.empty?
-
-        formatted_cert = OneLogin::RubySaml::Utils.format_cert(certificate_new)
-        OpenSSL::X509::Certificate.new(formatted_cert)
+        node = get_sp_certs[:signing].last
+        node[0] if node
       end
 
-      # @return [OpenSSL::PKey::RSA] Build the SP private from the settings (previously format it)
-      #
-      def get_sp_key
-        return nil if private_key.nil? || private_key.empty?
-
-        formatted_private_key = OneLogin::RubySaml::Utils.format_private_key(private_key)
-        OpenSSL::PKey::RSA.new(formatted_private_key)
+      def idp_binding_from_embed_sign
+        security[:embed_sign] ? Utils::BINDINGS[:post] : Utils::BINDINGS[:redirect]
       end
 
-      private
+      def get_binding(value)
+        return unless value
+
+        Utils::BINDINGS[value.to_sym] || value
+      end
 
       DEFAULTS = {
-        :assertion_consumer_service_binding        => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST".freeze,
-        :single_logout_service_binding             => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect".freeze,
+        :assertion_consumer_service_binding        => Utils::BINDINGS[:post],
+        :single_logout_service_binding             => Utils::BINDINGS[:redirect],
         :idp_cert_fingerprint_algorithm            => XMLSecurity::Document::SHA1,
         :compress_request                          => true,
         :compress_response                         => true,
+        :message_max_bytesize                      => 250000,
         :soft                                      => true,
+        :check_malformed_doc                       => true,
         :double_quote_xml_attribute_values         => false,
+        
         :security                                  => {
           :authn_requests_signed      => false,
           :logout_requests_signed     => false,
@@ -268,13 +293,94 @@ module OneLogin
           :want_assertions_encrypted  => false,
           :want_name_id               => false,
           :metadata_signed            => false,
-          :embed_sign                 => false,
+          :embed_sign                 => false, # Deprecated
           :digest_method              => XMLSecurity::Document::SHA1,
           :signature_method           => XMLSecurity::Document::RSA_SHA1,
           :check_idp_cert_expiration  => false,
-          :check_sp_cert_expiration   => false
+          :check_sp_cert_expiration   => false,
+          :strict_audience_validation => false,
+          :lowercase_url_encoding     => false
         }.freeze
       }.freeze
+
+      private
+
+      # @return [Hash<Symbol, Array<Array<OpenSSL::X509::Certificate, OpenSSL::PKey::RSA>>>]
+      #   Build the SP certificates and private keys from the settings. Returns all
+      #   certificates and private keys, even if they are expired.
+      def get_all_sp_certs
+        validate_sp_certs_params!
+        get_sp_certs_multi || get_sp_certs_single
+      end
+
+      # Validate certificate, certificate_new, private_key, and sp_cert_multi params.
+      def validate_sp_certs_params!
+        multi    = sp_cert_multi   && !sp_cert_multi.empty?
+        cert     = certificate     && !certificate.empty?
+        cert_new = certificate_new && !certificate_new.empty?
+        pk       = private_key     && !private_key.empty?
+        if multi && (cert || cert_new || pk)
+          raise ArgumentError.new("Cannot specify both sp_cert_multi and certificate, certificate_new, private_key parameters")
+        end
+      end
+
+      # Get certs from certificate, certificate_new, and private_key parameters.
+      def get_sp_certs_single
+        certs = { :signing => [], :encryption => [] }
+
+        sp_key = OneLogin::RubySaml::Utils.build_private_key_object(private_key)
+        cert = OneLogin::RubySaml::Utils.build_cert_object(certificate)
+        if cert || sp_key
+          ary = [cert, sp_key].freeze
+          certs[:signing] << ary
+          certs[:encryption] << ary
+        end
+
+        cert_new = OneLogin::RubySaml::Utils.build_cert_object(certificate_new)
+        if cert_new
+          ary = [cert_new, sp_key].freeze
+          certs[:signing] << ary
+          certs[:encryption] << ary
+        end
+
+        certs
+      end
+
+      # Get certs from get_sp_cert_multi parameter.
+      def get_sp_certs_multi
+        return if sp_cert_multi.nil? || sp_cert_multi.empty?
+
+        raise ArgumentError.new("sp_cert_multi must be a Hash") unless sp_cert_multi.is_a?(Hash)
+
+        certs = { :signing => [], :encryption => [] }.freeze
+
+        [:signing, :encryption].each do |type|
+          certs_for_type = sp_cert_multi[type] || sp_cert_multi[type.to_s]
+          next if !certs_for_type || certs_for_type.empty?
+
+          unless certs_for_type.is_a?(Array) && certs_for_type.all? { |cert| cert.is_a?(Hash) }
+            raise ArgumentError.new("sp_cert_multi :#{type} node must be an Array of Hashes")
+          end
+
+          certs_for_type.each do |pair|
+            cert = pair[:certificate] || pair['certificate'] || pair[:cert] || pair['cert']
+            key  = pair[:private_key] || pair['private_key'] || pair[:key] || pair['key']
+
+            unless cert && key
+              raise ArgumentError.new("sp_cert_multi :#{type} node Hashes must specify keys :certificate and :private_key")
+            end
+
+            certs[type] << [
+              OneLogin::RubySaml::Utils.build_cert_object(cert),
+              OneLogin::RubySaml::Utils.build_private_key_object(key)
+            ].freeze
+          end
+        end
+
+        certs.each { |_, ary| ary.freeze }
+        certs
+      end
     end
   end
 end
+

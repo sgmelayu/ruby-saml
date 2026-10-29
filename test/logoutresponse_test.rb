@@ -24,7 +24,7 @@ class RubySamlTest < Minitest::Test
         logoutresponse = OneLogin::RubySaml::Logoutresponse.new(valid_logout_response_document, nil, { :foo => :bar} )
         assert !logoutresponse.options.empty?
       end
-      it "support base64 encoded responses" do
+      it "supports base64 encoded responses" do
         generated_logout_response = valid_logout_response_document
         logoutresponse = OneLogin::RubySaml::Logoutresponse.new(Base64.encode64(generated_logout_response), settings)
         assert_equal generated_logout_response, logoutresponse.response
@@ -227,7 +227,6 @@ class RubySamlTest < Minitest::Test
           settings.soft = true
           settings.idp_slo_service_url = "http://example.com?field=value"
           settings.security[:logout_responses_signed] = true
-          settings.security[:embed_sign] = false
           settings.certificate = ruby_saml_cert_text
           settings.private_key = ruby_saml_key_text
           settings.idp_cert = ruby_saml_cert_text
@@ -316,7 +315,7 @@ class RubySamlTest < Minitest::Test
           assert_equal(CGI.unescape(query), CGI.unescape(original_query))
           # Make normalised signature based on our modified params.
           sign_algorithm = XMLSecurity::BaseDocument.new.algorithm(settings.security[:signature_method])
-          signature = settings.get_sp_key.sign(sign_algorithm.new, query)
+          signature = settings.get_sp_signing_key.sign(sign_algorithm.new, query)
           params['Signature'] = Base64.encode64(signature).gsub(/\n/, "")
           # Re-create the Logoutresponse based on these modified parameters,
           # and ask it to validate the signature. It will do it incorrectly,
@@ -352,7 +351,7 @@ class RubySamlTest < Minitest::Test
           assert_equal(CGI.unescape(query), CGI.unescape(original_query))
           # Make normalised signature based on our modified params.
           sign_algorithm = XMLSecurity::BaseDocument.new.algorithm(settings.security[:signature_method])
-          signature = settings.get_sp_key.sign(sign_algorithm.new, query)
+          signature = settings.get_sp_signing_key.sign(sign_algorithm.new, query)
           params['Signature'] = Base64.encode64(signature).gsub(/\n/, "")
           # Re-create the Logoutresponse based on these modified parameters,
           # and ask it to validate the signature. Provide the altered parameter
@@ -376,7 +375,6 @@ class RubySamlTest < Minitest::Test
           settings.idp_slo_service_url = "http://example.com?field=value"
           settings.security[:signature_method] = XMLSecurity::Document::RSA_SHA1
           settings.security[:logout_responses_signed] = true
-          settings.security[:embed_sign] = false
           settings.certificate = ruby_saml_cert_text
           settings.private_key = ruby_saml_key_text
           settings.idp_cert = nil

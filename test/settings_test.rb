@@ -14,23 +14,69 @@ class SettingsTest < Minitest::Test
       accessors = [
         :idp_entity_id, :idp_sso_target_url, :idp_sso_service_url, :idp_slo_target_url, :idp_slo_service_url, :valid_until,
         :idp_cert, :idp_cert_fingerprint, :idp_cert_fingerprint_algorithm, :idp_cert_multi,
-        :idp_attribute_names, :issuer, :assertion_consumer_service_url, :assertion_consumer_service_binding,
-        :single_logout_service_url, :single_logout_service_binding,
+        :idp_attribute_names, :issuer, :assertion_consumer_service_url, :single_logout_service_url,
         :sp_name_qualifier, :name_identifier_format, :name_identifier_value, :name_identifier_value_requested,
         :sessionindex, :attributes_index, :passive, :force_authn,
-        :compress_request, :double_quote_xml_attribute_values, :protocol_binding,
-        :security, :certificate, :private_key,
+        :compress_request, :double_quote_xml_attribute_values, :message_max_bytesize,
+        :security, :certificate, :private_key, :certificate_new, :sp_cert_multi,
         :authn_context, :authn_context_comparison, :authn_context_decl_ref,
-        :assertion_consumer_logout_service_url,
-        :assertion_consumer_logout_service_binding
+        :assertion_consumer_logout_service_url
       ]
 
       accessors.each do |accessor|
         value = Kernel.rand
         @settings.send("#{accessor}=".to_sym, value)
         assert_equal value, @settings.send(accessor)
-      end
 
+        @settings.send("#{accessor}=".to_sym, nil)
+        assert_nil @settings.send(accessor)
+      end
+    end
+
+    it "should provide getters and settings for binding parameters" do
+      accessors = [
+        :protocol_binding, :assertion_consumer_service_binding,
+        :single_logout_service_binding, :assertion_consumer_logout_service_binding
+      ]
+
+      accessors.each do |accessor|
+        value = Kernel.rand.to_s
+        @settings.send("#{accessor}=".to_sym, value)
+        assert_equal value, @settings.send(accessor)
+
+        @settings.send("#{accessor}=".to_sym, :redirect)
+        assert_equal "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect", @settings.send(accessor)
+
+        @settings.send("#{accessor}=".to_sym, :post)
+        assert_equal "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", @settings.send(accessor)
+
+        @settings.send("#{accessor}=".to_sym, nil)
+        assert_nil @settings.send(accessor)
+      end
+    end
+
+    it "idp_sso/slo_service_binding should fallback to :embed_sign inferred value" do
+      accessors = [:idp_sso_service_binding, :idp_slo_service_binding]
+
+      accessors.each do |accessor|
+        @settings.security[:embed_sign] = true
+
+        value = Kernel.rand.to_s
+        @settings.send("#{accessor}=".to_sym, value)
+        assert_equal value, @settings.send(accessor)
+
+        @settings.send("#{accessor}=".to_sym, :redirect)
+        assert_equal "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect", @settings.send(accessor)
+
+        @settings.send("#{accessor}=".to_sym, :post)
+        assert_equal "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", @settings.send(accessor)
+
+        @settings.send("#{accessor}=".to_sym, nil)
+        assert_equal "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", @settings.send(accessor)
+
+        @settings.security[:embed_sign] = false
+        assert_equal "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect", @settings.send(accessor)
+      end
     end
 
     it "create settings from hash" do
@@ -39,8 +85,11 @@ class SettingsTest < Minitest::Test
           :issuer => "http://muda.no",
           :sp_name_qualifier => "http://sso.muda.no",
           :idp_sso_service_url => "http://sso.muda.no/sso",
+          :idp_sso_service_binding => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
           :idp_slo_service_url => "http://sso.muda.no/slo",
+          :idp_slo_service_binding => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
           :idp_cert_fingerprint => "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00",
+          :message_max_bytesize => 750000,
           :valid_until => '2029-04-16T03:35:08.277Z',
           :name_identifier_format => "urn:oasis:names:tc:SAML:2.0:nameid-format:transient",
           :attributes_index => 30,
@@ -208,11 +257,54 @@ class SettingsTest < Minitest::Test
         assert_equal empty_multi, @settings.get_idp_cert_multi
       end
 
-      it "returns the hash with certificates when values were valid" do
-        certificates = ruby_saml_cert_text
+      it "returns partial hash when contains some values with string keys" do
+        empty_multi = {
+          :signing => [],
+          :encryption => []
+        }
+
         @settings.idp_cert_multi = {
-          :signing => [ruby_saml_cert_text],
-          :encryption => [ruby_saml_cert_text],
+          "signing" => []
+        }
+        assert_equal empty_multi, @settings.get_idp_cert_multi
+
+        @settings.idp_cert_multi = {
+          "encryption" => []
+        }
+        assert_equal empty_multi, @settings.get_idp_cert_multi
+
+        @settings.idp_cert_multi = {
+          "signing" => [],
+          "encryption" => []
+        }
+        assert_equal empty_multi, @settings.get_idp_cert_multi
+
+        @settings.idp_cert_multi = {
+          "yyy" => [],
+          "zzz" => []
+        }
+        assert_equal empty_multi, @settings.get_idp_cert_multi
+      end
+
+      it "returns the hash with certificates when values were valid" do
+        certificates = [ruby_saml_cert_text]
+        @settings.idp_cert_multi = {
+          :signing => certificates,
+          :encryption => certificates,
+        }
+
+        assert @settings.get_idp_cert_multi.kind_of? Hash
+        assert @settings.get_idp_cert_multi[:signing].kind_of? Array
+        assert @settings.get_idp_cert_multi[:encryption].kind_of? Array
+        assert @settings.get_idp_cert_multi[:signing][0].kind_of? OpenSSL::X509::Certificate
+        assert @settings.get_idp_cert_multi[:encryption][0].kind_of? OpenSSL::X509::Certificate
+      end
+
+      it "returns the hash with certificates when values were valid and with string keys" do
+        certificates = [ruby_saml_cert_text]
+        @settings.idp_cert_multi = {
+          "signing" => certificates,
+          "encryption" => certificates,
         }
 
         assert @settings.get_idp_cert_multi.kind_of? Hash
@@ -257,17 +349,13 @@ class SettingsTest < Minitest::Test
       it "raises when the certificate is not valid" do
         # formatted but invalid cert
         @settings.certificate = read_certificate("formatted_certificate")
-        assert_raises(OpenSSL::X509::CertificateError) {
-          @settings.get_sp_cert
-        }
+        assert_raises(OpenSSL::X509::CertificateError) { @settings.get_sp_cert }
       end
 
       it "raises an error if SP certificate expired and check_sp_cert_expiration enabled" do
         @settings.certificate = ruby_saml_cert_text
         @settings.security[:check_sp_cert_expiration] = true
-        assert_raises(OneLogin::RubySaml::ValidationError) {
-          settings.get_sp_cert
-        }
+        assert_raises(OneLogin::RubySaml::ValidationError) { @settings.get_sp_cert }
       end
     end
 
@@ -294,7 +382,6 @@ class SettingsTest < Minitest::Test
           @settings.get_sp_cert_new
         }
       end
-
     end
 
     describe "#get_sp_key" do
@@ -320,7 +407,6 @@ class SettingsTest < Minitest::Test
           @settings.get_sp_key
         }
       end
-
     end
 
     describe "#get_fingerprint" do
@@ -350,6 +436,303 @@ class SettingsTest < Minitest::Test
         @settings.idp_cert = ruby_saml_cert_text
         fingerprint = @settings.get_fingerprint
         assert fingerprint.downcase == ruby_saml_cert_fingerprint.downcase
+      end
+    end
+
+    describe "#get_sp_certs (base cases)" do
+      let(:cert_text1) { ruby_saml_cert_text }
+      let(:cert_text2) { ruby_saml_cert2.to_pem }
+      let(:cert_text3) { CertificateHelper.generate_cert.to_pem }
+      let(:key_text1)  { ruby_saml_key_text }
+      let(:key_text2)  { CertificateHelper.generate_key.to_pem }
+
+      it "returns certs for single case" do
+        @settings.certificate = cert_text1
+        @settings.private_key = key_text1
+
+        actual = @settings.get_sp_certs
+        expected = [[cert_text1, key_text1]]
+        assert_equal [:signing, :encryption], actual.keys
+        assert_equal expected, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "returns certs for single case with new cert" do
+        @settings.certificate = cert_text1
+        @settings.certificate_new = cert_text2
+        @settings.private_key = key_text1
+
+        actual = @settings.get_sp_certs
+        expected = [[cert_text1, key_text1], [cert_text2, key_text1]]
+        assert_equal [:signing, :encryption], actual.keys
+        assert_equal expected, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "returns certs for multi case" do
+        @settings.sp_cert_multi = {
+          signing: [{ certificate: cert_text1, private_key: key_text1 },
+                    { certificate: cert_text2, private_key: key_text1 }],
+          encryption: [{ certificate: cert_text2, private_key: key_text1 },
+                       { certificate: cert_text3, private_key: key_text2 }]
+        }
+
+        actual = @settings.get_sp_certs
+        expected_signing = [[cert_text1, key_text1], [cert_text2, key_text1]]
+        expected_encryption = [[cert_text2, key_text1], [cert_text3, key_text2]]
+        assert_equal [:signing, :encryption], actual.keys
+        assert_equal expected_signing, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected_encryption, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "sp_cert_multi allows sending only signing" do
+        @settings.sp_cert_multi = {
+          signing: [{ certificate: cert_text1, private_key: key_text1 },
+                    { certificate: cert_text2, private_key: key_text1 }]
+        }
+
+        actual = @settings.get_sp_certs
+        expected_signing = [[cert_text1, key_text1], [cert_text2, key_text1]]
+        assert_equal [:signing, :encryption], actual.keys
+        assert_equal expected_signing, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal [], actual[:encryption]
+      end
+
+      it "raises error when sp_cert_multi is not a Hash" do
+        @settings.sp_cert_multi = 'invalid_type'
+
+        error_message = 'sp_cert_multi must be a Hash'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "raises error when sp_cert_multi does not contain an Array of Hashes" do
+        @settings.sp_cert_multi = { signing: 'invalid_type' }
+
+        error_message = 'sp_cert_multi :signing node must be an Array of Hashes'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "raises error when sp_cert_multi inner node missing :certificate" do
+        @settings.sp_cert_multi = { signing: [{ private_key: key_text1 }] }
+
+        error_message = 'sp_cert_multi :signing node Hashes must specify keys :certificate and :private_key'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "raises error when sp_cert_multi inner node missing :private_key" do
+        @settings.sp_cert_multi = { signing: [{ certificate: cert_text1 }] }
+
+        error_message = 'sp_cert_multi :signing node Hashes must specify keys :certificate and :private_key'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "handles sp_cert_multi with string keys" do
+        @settings.sp_cert_multi = {
+          'signing' => [{ 'certificate' => cert_text1, 'private_key' => key_text1 }],
+          'encryption' => [{ 'certificate' => cert_text2, 'private_key' => key_text1 }]
+        }
+
+        actual = @settings.get_sp_certs
+        expected_signing = [[cert_text1, key_text1]]
+        expected_encryption = [[cert_text2, key_text1]]
+        assert_equal [:signing, :encryption], actual.keys
+        assert_equal expected_signing, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected_encryption, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "handles sp_cert_multi with alternate inner keys :cert and :key" do
+        @settings.sp_cert_multi = {
+          signing: [{ cert: cert_text1, key: key_text1 }],
+          encryption: [{ 'cert' => cert_text2, 'key' => key_text1 }]
+        }
+
+        actual = @settings.get_sp_certs
+        expected_signing = [[cert_text1, key_text1]]
+        expected_encryption = [[cert_text2, key_text1]]
+        assert_equal [:signing, :encryption], actual.keys
+        assert_equal expected_signing, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected_encryption, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "raises error when both sp_cert_multi and certificate are specified" do
+        @settings.sp_cert_multi = { signing: [{ certificate: cert_text1, private_key: key_text1 }] }
+        @settings.certificate = cert_text1
+
+        error_message = 'Cannot specify both sp_cert_multi and certificate, certificate_new, private_key parameters'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "raises error when both sp_cert_multi and certificate_new are specified" do
+        @settings.sp_cert_multi = { signing: [{ certificate: cert_text1, private_key: key_text1 }] }
+        @settings.certificate_new = cert_text2
+
+        error_message = 'Cannot specify both sp_cert_multi and certificate, certificate_new, private_key parameters'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "raises error when both sp_cert_multi and private_key are specified" do
+        @settings.sp_cert_multi = { signing: [{ certificate: cert_text1, private_key: key_text1 }] }
+        @settings.private_key = key_text1
+
+        error_message = 'Cannot specify both sp_cert_multi and certificate, certificate_new, private_key parameters'
+        assert_raises ArgumentError, error_message do
+          @settings.get_sp_certs
+        end
+      end
+    end
+
+    describe "#get_sp_certs" do
+      let(:valid_pair) { CertificateHelper.generate_pair_hash }
+      let(:early_pair) { CertificateHelper.generate_pair_hash(not_before: Time.now + 60) }
+      let(:expired_pair) { CertificateHelper.generate_pair_hash(not_after: Time.now - 60) }
+
+      it "returns all certs when check_sp_cert_expiration is false" do
+        @settings.security = { check_sp_cert_expiration: false }
+        @settings.sp_cert_multi = { signing: [valid_pair, expired_pair], encryption: [valid_pair, early_pair] }
+
+        actual = @settings.get_sp_certs
+        expected_signing = [valid_pair, expired_pair].map(&:values)
+        expected_encryption = [valid_pair, early_pair].map(&:values)
+        assert_equal expected_signing, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected_encryption, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "returns only active certs when check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { signing: [valid_pair, expired_pair], encryption: [valid_pair, early_pair] }
+
+        actual = @settings.get_sp_certs
+        expected_active = [valid_pair].map(&:values)
+        assert_equal expected_active, actual[:signing].map {|ary| ary.map(&:to_pem) }
+        assert_equal expected_active, actual[:encryption].map {|ary| ary.map(&:to_pem) }
+      end
+
+      it "raises error when all certificates are expired in signing and check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { signing: [expired_pair], encryption: [valid_pair] }
+
+        assert_raises OneLogin::RubySaml::ValidationError do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "raises error when all certificates are expired in encryption and check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { signing: [valid_pair], encryption: [expired_pair] }
+
+        assert_raises OneLogin::RubySaml::ValidationError do
+          @settings.get_sp_certs
+        end
+      end
+
+      it "returns empty arrays for signing and encryption if no pairs are present" do
+        @settings.sp_cert_multi = { signing: [], encryption: [] }
+
+        actual = @settings.get_sp_certs
+        assert_empty actual[:signing]
+        assert_empty actual[:encryption]
+      end
+    end
+
+    describe "#get_sp_signing_pair and #get_sp_signing_key" do
+      let(:valid_pair) { CertificateHelper.generate_pair_hash }
+      let(:early_pair) { CertificateHelper.generate_pair_hash(not_before: Time.now + 60) }
+      let(:expired)  { CertificateHelper.generate_pair_hash(not_after: Time.now - 60) }
+
+      it "returns nil when no signing pairs are present" do
+        @settings.sp_cert_multi = { signing: [] }
+
+        assert_nil @settings.get_sp_signing_pair
+        assert_nil @settings.get_sp_signing_key
+      end
+
+      it "returns the first pair if check_sp_cert_expiration is false" do
+        @settings.security = { check_sp_cert_expiration: false }
+        @settings.sp_cert_multi = { signing: [early_pair, expired, valid_pair] }
+
+        assert_equal early_pair.values, @settings.get_sp_signing_pair.map(&:to_pem)
+        assert_equal early_pair[:private_key], @settings.get_sp_signing_key.to_pem
+      end
+
+      it "returns the first active pair when check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { signing: [early_pair, expired, valid_pair] }
+
+        assert_equal valid_pair.values, @settings.get_sp_signing_pair.map(&:to_pem)
+        assert_equal valid_pair[:private_key], @settings.get_sp_signing_key.to_pem
+      end
+
+      it "raises error when all certificates are expired and check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { signing: [early_pair, expired] }
+
+        assert_raises OneLogin::RubySaml::ValidationError do
+          @settings.get_sp_signing_pair
+        end
+
+        assert_raises OneLogin::RubySaml::ValidationError do
+          @settings.get_sp_signing_key
+        end
+      end
+    end
+
+    describe "#get_sp_decryption_keys" do
+      let(:valid_pair) { CertificateHelper.generate_pair_hash }
+      let(:early_pair) { CertificateHelper.generate_pair_hash(not_before: Time.now + 60) }
+      let(:expired_pair) { CertificateHelper.generate_pair_hash(not_after: Time.now - 60) }
+
+      it "returns an empty array when no decryption pairs are present" do
+        @settings.sp_cert_multi = { encryption: [] }
+
+        assert_empty @settings.get_sp_decryption_keys
+      end
+
+      it "returns all keys when check_sp_cert_expiration is false" do
+        @settings.security = { check_sp_cert_expiration: false }
+        @settings.sp_cert_multi = { encryption: [early_pair, expired_pair, valid_pair] }
+
+        expected_keys = [early_pair, expired_pair, valid_pair].map { |pair| pair[:private_key] }
+        actual_keys = @settings.get_sp_decryption_keys.map(&:to_pem)
+        assert_equal expected_keys, actual_keys
+      end
+
+      it "returns only keys of active certificates when check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { encryption: [early_pair, expired_pair, valid_pair] }
+
+        expected_keys = [valid_pair[:private_key]]
+        actual_keys = @settings.get_sp_decryption_keys.map(&:to_pem)
+        assert_equal expected_keys, actual_keys
+      end
+
+      it "raises error when all certificates are expired and check_sp_cert_expiration is true" do
+        @settings.security = { check_sp_cert_expiration: true }
+        @settings.sp_cert_multi = { encryption: [early_pair, expired_pair] }
+
+        assert_raises OneLogin::RubySaml::ValidationError do
+          @settings.get_sp_decryption_keys
+        end
+      end
+
+      it "removes duplicates" do
+        @settings.sp_cert_multi = { encryption: [early_pair, valid_pair, early_pair, valid_pair] }
+
+        expected_keys = [early_pair, valid_pair].map { |pair| pair[:private_key] }
+        actual_keys = @settings.get_sp_decryption_keys.map(&:to_pem)
+
+        assert_equal expected_keys, actual_keys
       end
     end
   end

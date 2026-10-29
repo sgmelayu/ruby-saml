@@ -13,20 +13,47 @@ module OneLogin
     class Utils
       @@uuid_generator = UUID.new if RUBY_VERSION < '1.9'
 
-      DSIG      = "http://www.w3.org/2000/09/xmldsig#"
-      XENC      = "http://www.w3.org/2001/04/xmlenc#"
-      DURATION_FORMAT = %r(^(-?)P(?:(?:(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)|(?:(\d+)W))$)
+      BINDINGS = { :post => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST".freeze,
+                   :redirect => "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect".freeze }.freeze
+      DSIG = "http://www.w3.org/2000/09/xmldsig#".freeze
+      XENC = "http://www.w3.org/2001/04/xmlenc#".freeze
+      DURATION_FORMAT = %r(^
+        (-?)P                       # 1: Duration sign
+        (?:
+          (?:(\d+)Y)?               # 2: Years
+          (?:(\d+)M)?               # 3: Months
+          (?:(\d+)D)?               # 4: Days
+          (?:T
+            (?:(\d+)H)?             # 5: Hours
+            (?:(\d+)M)?             # 6: Minutes
+            (?:(\d+(?:[.,]\d+)?)S)? # 7: Seconds
+          )?
+          |
+          (\d+)W                    # 8: Weeks
+        )
+      $)x.freeze
 
-      # Checks if the x509 cert provided is expired
+      UUID_PREFIX = '_'
+      @@prefix = '_'
+
+      # Checks if the x509 cert provided is expired.
       #
-      # @param cert [Certificate] The x509 certificate
-      #
+      # @param cert [OpenSSL::X509::Certificate|String] The x509 certificate.
+      # @return [true|false] Whether the certificate is expired.
       def self.is_cert_expired(cert)
-        if cert.is_a?(String)
-          cert = OpenSSL::X509::Certificate.new(cert)
-        end
+        cert = OpenSSL::X509::Certificate.new(cert) if cert.is_a?(String)
 
-        return cert.not_after < Time.now
+        cert.not_after < Time.now
+      end
+
+      # Checks if the x509 cert provided has both started and has not expired.
+      #
+      # @param cert [OpenSSL::X509::Certificate|String] The x509 certificate.
+      # @return [true|false] Whether the certificate is currently active.
+      def self.is_cert_active(cert)
+        cert = OpenSSL::X509::Certificate.new(cert) if cert.is_a?(String)
+        now = Time.now
+        cert.not_before <= now && cert.not_after >= now
       end
 
       # Interprets a ISO8601 duration value relative to a given timestamp.
@@ -37,38 +64,33 @@ module OneLogin
       #                            current time.
       #
       # @return [Integer] The new timestamp, after the duration is applied.
-      # 
+      #
       def self.parse_duration(duration, timestamp=Time.now.utc)
+        return nil if RUBY_VERSION < '1.9'  # 1.8.7 not supported
+
         matches = duration.match(DURATION_FORMAT)
-      
+
         if matches.nil?
-          raise Exception.new("Invalid ISO 8601 duration")
+          raise StandardError.new("Invalid ISO 8601 duration")
         end
 
-        durYears = matches[2].to_i
-        durMonths = matches[3].to_i
-        durDays = matches[4].to_i
-        durHours = matches[5].to_i
-        durMinutes = matches[6].to_i
-        durSeconds = matches[7].to_f
-        durWeeks = matches[8].to_i
+        sign = matches[1] == '-' ? -1 : 1
 
-        if matches[1] == "-"
-          durYears = -durYears
-          durMonths = -durMonths
-          durDays = -durDays
-          durHours = -durHours
-          durMinutes = -durMinutes
-          durSeconds = -durSeconds
-          durWeeks = -durWeeks
-        end
+        durYears, durMonths, durDays, durHours, durMinutes, durSeconds, durWeeks =
+          matches[2..8].map do |match|
+            if match
+              match = match.tr(',', '.').gsub(/\.0*\z/, '')
+              sign * (match.include?('.') ? match.to_f : match.to_i)
+            else
+              0
+            end
+          end
 
-        initial_datetime = Time.at(timestamp).utc.to_datetime
-        final_datetime = initial_datetime.next_year(durYears)
-        final_datetime = final_datetime.next_month(durMonths)
-        final_datetime = final_datetime.next_day((7*durWeeks) + durDays)
-        final_timestamp = final_datetime.to_time.utc.to_i + (durHours * 3600) + (durMinutes * 60) + durSeconds
-        return final_timestamp
+        datetime = Time.at(timestamp).utc.to_datetime
+        datetime = datetime.next_year(durYears)
+        datetime = datetime.next_month(durMonths)
+        datetime = datetime.next_day((7*durWeeks) + durDays)
+        datetime.to_time.utc.to_i + (durHours * 3600) + (durMinutes * 60) + durSeconds
       end
 
       # Return a properly formatted x509 certificate
@@ -122,6 +144,28 @@ module OneLogin
         "-----BEGIN #{key_label}-----\n#{key}\n-----END #{key_label}-----"
       end
 
+      # Given a certificate string, return an OpenSSL::X509::Certificate object.
+      #
+      # @param cert [String] The original certificate
+      # @return [OpenSSL::X509::Certificate] The certificate object
+      #
+      def self.build_cert_object(cert)
+        return nil if cert.nil? || cert.empty?
+
+        OpenSSL::X509::Certificate.new(format_cert(cert))
+      end
+
+      # Given a private key string, return an OpenSSL::PKey::RSA object.
+      #
+      # @param cert [String] The original private key
+      # @return [OpenSSL::PKey::RSA] The private key object
+      #
+      def self.build_private_key_object(private_key)
+        return nil if private_key.nil? || private_key.empty?
+
+        OpenSSL::PKey::RSA.new(format_private_key(private_key))
+      end
+
       # Build the Query String signature that will be used in the HTTP-Redirect binding
       # to generate the Signature
       # @param params [Hash] Parameters to build the Query String
@@ -161,30 +205,39 @@ module OneLogin
       #
       # @param rawparams [Hash] Raw GET Parameters
       # @param params [Hash] GET Parameters
+      # @param lowercase_url_encoding [bool] Lowercase URL Encoding  (For ADFS urlencode compatibility)
       # @return [Hash] New raw parameters
       #
-      def self.prepare_raw_get_params(rawparams, params)
+      def self.prepare_raw_get_params(rawparams, params, lowercase_url_encoding=false)
         rawparams ||= {}
 
         if rawparams['SAMLRequest'].nil? && !params['SAMLRequest'].nil?
-          rawparams['SAMLRequest'] = CGI.escape(params['SAMLRequest'])
+          rawparams['SAMLRequest'] = escape_request_param(params['SAMLRequest'], lowercase_url_encoding)
         end
         if rawparams['SAMLResponse'].nil? && !params['SAMLResponse'].nil?
-          rawparams['SAMLResponse'] = CGI.escape(params['SAMLResponse'])
+          rawparams['SAMLResponse'] = escape_request_param(params['SAMLResponse'], lowercase_url_encoding)
         end
         if rawparams['RelayState'].nil? && !params['RelayState'].nil?
-          rawparams['RelayState'] = CGI.escape(params['RelayState'])
+          rawparams['RelayState'] = escape_request_param(params['RelayState'], lowercase_url_encoding)
         end
         if rawparams['SigAlg'].nil? && !params['SigAlg'].nil?
-          rawparams['SigAlg'] = CGI.escape(params['SigAlg'])
+          rawparams['SigAlg'] = escape_request_param(params['SigAlg'], lowercase_url_encoding)
         end
 
         rawparams
       end
 
+      def self.escape_request_param(param, lowercase_url_encoding)
+        CGI.escape(param).tap do |escaped|
+          next unless lowercase_url_encoding
+
+          escaped.gsub!(/%[A-Fa-f0-9]{2}/) { |match| match.downcase }
+        end
+      end
+
       # Validate the Signature parameter sent on the HTTP-Redirect binding
       # @param params [Hash] Parameters to be used in the validation process
-      # @option params [OpenSSL::X509::Certificate] cert The Identity provider public certtificate
+      # @option params [OpenSSL::X509::Certificate] cert The IDP public certificate
       # @option params [String] sig_alg The SigAlg parameter
       # @option params [String] signature The Signature parameter (base64 encoded)
       # @option params [String] query_string The full GET Query String to be compared
@@ -198,9 +251,11 @@ module OneLogin
 
       # Build the status error message
       # @param status_code [String] StatusCode value
-      # @param status_message [Strig] StatusMessage value
+      # @param status_message [String] StatusMessage value
       # @return [String] The status error message
       def self.status_error_msg(error_msg, raw_status_code = nil, status_message = nil)
+        error_msg = error_msg.dup
+
         unless raw_status_code.nil?
           if raw_status_code.include? "|"
             status_codes = raw_status_code.split(' | ')
@@ -221,9 +276,29 @@ module OneLogin
         error_msg
       end
 
+      # Obtains the decrypted string from an Encrypted node element in XML,
+      # given multiple private keys to try.
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param private_keys [Array<OpenSSL::PKey::RSA>] The Service provider private key
+      # @return [String] The decrypted data
+      def self.decrypt_multi(encrypted_node, private_keys)
+        raise ArgumentError.new('private_keys must be specified') if !private_keys || private_keys.empty?
+
+        error = nil
+        private_keys.each do |key|
+          begin
+            return decrypt_data(encrypted_node, key)
+          rescue OpenSSL::PKey::PKeyError => e
+            error ||= e
+          end
+        end
+
+        raise(error) if error
+      end
+
       # Obtains the decrypted string from an Encrypted node element in XML
-      # @param encrypted_node [REXML::Element]     The Encrypted element
-      # @param private_key    [OpenSSL::PKey::RSA] The Service provider private key
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param private_key [OpenSSL::PKey::RSA] The Service provider private key
       # @return [String] The decrypted data
       def self.decrypt_data(encrypted_node, private_key)
         encrypt_data = REXML::XPath.first(
@@ -287,7 +362,7 @@ module OneLogin
 
       # Obtains the deciphered text
       # @param cipher_text [String]   The ciphered text
-      # @param symmetric_key [String] The symetric key used to encrypt the text
+      # @param symmetric_key [String] The symmetric key used to encrypt the text
       # @param algorithm [String]     The encrypted algorithm
       # @return [String] The deciphered text
       def self.retrieve_plaintext(cipher_text, symmetric_key, algorithm)
@@ -328,13 +403,21 @@ module OneLogin
         end
       end
 
+      def self.set_prefix(value)
+        @@prefix = value
+      end
+
+      def self.prefix
+        @@prefix
+      end
+
       def self.uuid
-        RUBY_VERSION < '1.9' ? "_#{@@uuid_generator.generate}" : "_#{SecureRandom.uuid}"
+        "#{prefix}" + (RUBY_VERSION < '1.9' ? "#{@@uuid_generator.generate}" : "#{SecureRandom.uuid}")
       end
 
       # Given two strings, attempt to match them as URIs using Rails' parse method.  If they can be parsed,
-      # then the fully-qualified domain name and the host should performa a case-insensitive match, per the
-      # RFC for URIs.  If Rails can not parse the string in to URL pieces, return a boolean match of the
+      # then the fully-qualified domain name and the host should perform a case-insensitive match, per the
+      # RFC for URIs.  If Rails can not parse the string into URL pieces, return a boolean match of the
       # two strings.  This maintains the previous functionality.
       # @return [Boolean]
       def self.uri_match?(destination_url, settings_url)

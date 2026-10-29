@@ -21,13 +21,13 @@ module OneLogin
 
       attr_accessor :soft
 
-      # Constructs the Logout Response. A Logout Response Object that is an extension of the SamlMessage class.
+      # Constructs the Logout Response. A Logout Response object that is an extension of the SamlMessage class.
       # @param response  [String] A UUEncoded logout response from the IdP.
       # @param settings  [OneLogin::RubySaml::Settings|nil] Toolkit settings
       # @param options   [Hash] Extra parameters.
       #                    :matches_request_id It will validate that the logout response matches the ID of the request.
       #                    :get_params GET Parameters, including the SAMLResponse
-      #                    :relax_signature_validation to accept signatures if no idp certificate registered on settings
+      #                    :relax_signature_validation to accept signatures if no IdP certificate registered on settings
       #
       # @raise [ArgumentError] if response is nil
       #
@@ -43,7 +43,7 @@ module OneLogin
         end
 
         @options = options
-        @response = decode_raw_saml(response)
+        @response = decode_raw_saml(response, settings)
         @document = XMLSecurity::SignedDocument.new(@response)
       end
 
@@ -52,7 +52,7 @@ module OneLogin
       end
 
       # Checks if the Status has the "Success" code
-      # @return [Boolean] True if the StatusCode is Sucess
+      # @return [Boolean] True if the StatusCode is Success
       # @raise [ValidationError] if soft == false and validation fails
       #
       def success?
@@ -150,7 +150,8 @@ module OneLogin
       # @raise [ValidationError] if soft == false and validation fails
       #
       def validate_structure
-        unless valid_saml?(document, soft)
+        check_malformed_doc = check_malformed_doc?(settings)
+        unless valid_saml?(document, soft, check_malformed_doc)
           return append_error("Invalid SAML Logout Response. Not match the saml-schema-protocol-2.0.xsd")
         end
 
@@ -158,7 +159,7 @@ module OneLogin
       end
 
        # Validates that the Logout Response provided in the initialization is not empty,
-       # also check that the setting and the IdP cert were also provided
+       # also check that the settings and the IdP cert were also provided
        # @return [Boolean] True if the required info is found, otherwise False if soft=True
        # @raise [ValidationError] if soft == false and validation fails
        #
@@ -176,9 +177,9 @@ module OneLogin
         true
       end
 
-      # Validates if a provided :matches_request_id matchs the inResponseTo value.
+      # Validates if a provided :matches_request_id matches the inResponseTo value.
       # @param soft [String|nil] request_id The ID of the Logout Request sent by this SP to the IdP (if was sent any)
-      # @return [Boolean] True if there is no request_id or it match, otherwise False if soft=True
+      # @return [Boolean] True if there is no request_id or it matches, otherwise False if soft=True
       # @raise [ValidationError] if soft == false and validation fails
       #
       def valid_in_response_to?
@@ -191,7 +192,7 @@ module OneLogin
       end
 
       # Validates the Issuer of the Logout Response
-      # @return [Boolean] True if the Issuer matchs the IdP entityId, otherwise False if soft=True
+      # @return [Boolean] True if the Issuer matches the IdP entityId, otherwise False if soft=True
       # @raise [ValidationError] if soft == false and validation fails
       #
       def valid_issuer?
@@ -212,7 +213,7 @@ module OneLogin
         return true unless options.has_key? :get_params
         return true unless options[:get_params].has_key? 'Signature'
 
-        options[:raw_get_params] = OneLogin::RubySaml::Utils.prepare_raw_get_params(options[:raw_get_params], options[:get_params])
+        options[:raw_get_params] = OneLogin::RubySaml::Utils.prepare_raw_get_params(options[:raw_get_params], options[:get_params], settings.security[:lowercase_url_encoding])
 
         if options[:get_params]['SigAlg'].nil? && !options[:raw_get_params]['SigAlg'].nil?
           options[:get_params]['SigAlg'] = CGI.unescape(options[:raw_get_params]['SigAlg'])

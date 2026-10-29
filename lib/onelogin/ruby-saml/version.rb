@@ -1,5 +1,5 @@
 module OneLogin
   module RubySaml
-    VERSION = '1.12.2'
+    VERSION = '1.18.1'
   end
 end

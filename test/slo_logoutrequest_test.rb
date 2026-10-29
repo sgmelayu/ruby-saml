@@ -10,6 +10,7 @@ class RubySamlTest < Minitest::Test
 
     let(:settings) { OneLogin::RubySaml::Settings.new }
     let(:logout_request) { OneLogin::RubySaml::SloLogoutrequest.new(logout_request_document) }
+    let(:logout_request_encrypted_nameid) { OneLogin::RubySaml::SloLogoutrequest.new(logout_request_encrypted_nameid_document) }
     let(:invalid_logout_request) { OneLogin::RubySaml::SloLogoutrequest.new(invalid_logout_request_document) }
 
     before do
@@ -55,7 +56,6 @@ class RubySamlTest < Minitest::Test
       it "collect errors when collect_errors=true" do
         settings.idp_entity_id = 'http://idp.example.com/invalid'
         settings.security[:logout_requests_signed] = true
-        settings.security[:embed_sign] = false
         settings.certificate = ruby_saml_cert_text
         settings.private_key = ruby_saml_key_text
         settings.idp_cert = ruby_saml_cert_text
@@ -88,6 +88,18 @@ class RubySamlTest < Minitest::Test
       it "extract the value of the name id element" do
         assert_equal "someone@example.org", logout_request.nameid
       end
+
+      it 'is not possible when encryptID but no private key' do
+        assert_raises(OneLogin::RubySaml::ValidationError, "An EncryptedID found and no SP private key found on the settings to decrypt it") do
+          assert_equal "someone@example.org", logout_request_encrypted_nameid.nameid
+        end
+      end
+
+      it "extract the value of the name id element inside an EncryptedId" do
+        settings.private_key = ruby_saml_key_text
+        logout_request_encrypted_nameid.settings = settings
+        assert_equal "someone@example.org", logout_request_encrypted_nameid.nameid
+      end
     end
 
     describe "#nameid_format" do
@@ -95,6 +107,18 @@ class RubySamlTest < Minitest::Test
 
       it "extract the format attribute of the name id element" do
         assert_equal "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", logout_request.nameid_format
+      end
+
+      it 'is not possible when encryptID but no private key' do
+        assert_raises(OneLogin::RubySaml::ValidationError, "An EncryptedID found and no SP private key found on the settings to decrypt it") do
+          assert_equal "someone@example.org", logout_request_encrypted_nameid.nameid
+        end
+      end
+
+      it "extract the format attribute of the name id element" do
+        settings.private_key = ruby_saml_key_text
+        logout_request_encrypted_nameid.settings = settings
+        assert_equal "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", logout_request_encrypted_nameid.nameid_format
       end
     end
 
@@ -110,7 +134,7 @@ class RubySamlTest < Minitest::Test
       end
     end
 
-   describe "#not_on_or_after" do
+    describe "#not_on_or_after" do
       it "extract the value of the NotOnOrAfter attribute" do
         time_value = '2014-07-17T01:01:48Z'
         assert_nil logout_request.not_on_or_after
@@ -159,25 +183,52 @@ class RubySamlTest < Minitest::Test
       it "return true when the logout request has a valid NotOnOrAfter or does not contain any" do
         assert logout_request.send(:validate_not_on_or_after)
         assert_empty logout_request.errors
-        Timecop.freeze Time.parse('2011-06-14T18:25:01.516Z') do
-          time_value = '2014-07-17T01:01:48Z'
-          logout_request.document.root.attributes['NotOnOrAfter'] = time_value
+
+        Timecop.freeze Time.parse('2014-07-17T01:01:47Z') do
+          logout_request.document.root.attributes['NotOnOrAfter'] = '2014-07-17T01:01:48Z'
           assert logout_request.send(:validate_not_on_or_after)
           assert_empty logout_request.errors
         end
       end
 
       it "return false when the logout request has an invalid NotOnOrAfter" do
-        logout_request.document.root.attributes['NotOnOrAfter'] = '2014-07-17T01:01:48Z'
-        assert !logout_request.send(:validate_not_on_or_after)
-        assert /Current time is on or after NotOnOrAfter/.match(logout_request.errors[0])
+        Timecop.freeze Time.parse('2014-07-17T01:01:49Z') do
+          logout_request.document.root.attributes['NotOnOrAfter'] = '2014-07-17T01:01:48Z'
+          assert !logout_request.send(:validate_not_on_or_after)
+          assert_match(/Current time is on or after NotOnOrAfter/, logout_request.errors[0])
+        end
       end
 
       it "raise when the logout request has an invalid NotOnOrAfter" do
-        logout_request.document.root.attributes['NotOnOrAfter'] = '2014-07-17T01:01:48Z'
-        logout_request.soft = false
-        assert_raises(OneLogin::RubySaml::ValidationError, "Current time is on or after NotOnOrAfter") do
-          logout_request.send(:validate_not_on_or_after)
+        Timecop.freeze Time.parse('2014-07-17T01:01:49Z') do
+          logout_request.document.root.attributes['NotOnOrAfter'] = '2014-07-17T01:01:48Z'
+          logout_request.soft = false
+          assert_raises(OneLogin::RubySaml::ValidationError, "Current time is on or after NotOnOrAfter") do
+            logout_request.send(:validate_not_on_or_after)
+          end
+        end
+      end
+
+      it "optionally allows for clock drift" do
+        # Java Floats behave differently than MRI
+        java = jruby? || truffleruby?
+
+        logout_request.soft = true
+        logout_request.document.root.attributes['NotOnOrAfter'] = '2011-06-14T18:31:01.516Z'
+
+        # The NotBefore condition in the document is 2011-06-1418:31:01.516Z
+        Timecop.freeze(Time.parse("2011-06-14T18:31:02Z")) do
+          logout_request.options[:allowed_clock_drift] = 0.483
+          assert !logout_request.send(:validate_not_on_or_after)
+
+          logout_request.options[:allowed_clock_drift] = java ? 0.485 : 0.484
+          assert logout_request.send(:validate_not_on_or_after)
+
+          logout_request.options[:allowed_clock_drift] = '0.483'
+          assert !logout_request.send(:validate_not_on_or_after)
+
+          logout_request.options[:allowed_clock_drift] = java ? '0.485' : '0.484'
+          assert logout_request.send(:validate_not_on_or_after)
         end
       end
     end
@@ -230,11 +281,13 @@ class RubySamlTest < Minitest::Test
         logout_request.settings.idp_entity_id = 'https://app.onelogin.com/saml/metadata/SOMEACCOUNT'
         assert logout_request.send(:validate_issuer)
       end
+
       it "return false when the issuer of the Logout Request does not match the IdP entityId" do
         logout_request.settings.idp_entity_id = 'http://idp.example.com/invalid'
         assert !logout_request.send(:validate_issuer)
         assert_includes logout_request.errors, "Doesn't match the issuer, expected: <#{logout_request.settings.idp_entity_id}>, but was: <https://app.onelogin.com/saml/metadata/SOMEACCOUNT>"
       end
+
       it "raise when the issuer of the Logout Request does not match the IdP entityId" do
         logout_request.settings.idp_entity_id = 'http://idp.example.com/invalid'
         logout_request.soft = false
@@ -247,7 +300,6 @@ class RubySamlTest < Minitest::Test
     describe "#validate_signature" do
       before do
         settings.security[:logout_requests_signed] = true
-        settings.security[:embed_sign] = false
         settings.certificate = ruby_saml_cert_text
         settings.private_key = ruby_saml_key_text
         settings.idp_cert = ruby_saml_cert_text
@@ -350,7 +402,7 @@ class RubySamlTest < Minitest::Test
         assert_equal(CGI.unescape(query), CGI.unescape(original_query))
         # Make normalised signature based on our modified params.
         sign_algorithm = XMLSecurity::BaseDocument.new.algorithm(settings.security[:signature_method])
-        signature = settings.get_sp_key.sign(sign_algorithm.new, query)
+        signature = settings.get_sp_signing_key.sign(sign_algorithm.new, query)
         params['Signature'] = Base64.encode64(signature).gsub(/\n/, "")
         # Construct SloLogoutrequest and ask it to validate the signature.
         # It will do it incorrectly, because it will compute it based on re-encoded
@@ -385,7 +437,7 @@ class RubySamlTest < Minitest::Test
         assert_equal(CGI.unescape(query), CGI.unescape(original_query))
         # Make normalised signature based on our modified params.
         sign_algorithm = XMLSecurity::BaseDocument.new.algorithm(settings.security[:signature_method])
-        signature = settings.get_sp_key.sign(sign_algorithm.new, query)
+        signature = settings.get_sp_signing_key.sign(sign_algorithm.new, query)
         params['Signature'] = Base64.encode64(signature).gsub(/\n/, "")
         # Construct SloLogoutrequest and ask it to validate the signature.
         # Provide the altered parameter in its raw URI-encoded form,
@@ -400,6 +452,52 @@ class RubySamlTest < Minitest::Test
         logout_request_sign_test = OneLogin::RubySaml::SloLogoutrequest.new(params['SAMLRequest'], options)
         assert logout_request_sign_test.send(:validate_signature)
       end
+
+      it "handles Azure AD downcased request encoding" do
+        # Use Logoutrequest only to build the SAMLRequest parameter.
+        settings.security[:signature_method] = XMLSecurity::Document::RSA_SHA256
+        settings.soft = false
+
+        # Creating the query manually to tweak it later instead of using
+        # OneLogin::RubySaml::Utils.build_query
+        request_doc = OneLogin::RubySaml::Logoutrequest.new.create_logout_request_xml_doc(settings)
+        request = Zlib::Deflate.deflate(request_doc.to_s, 9)[2..-5]
+        base64_request = Base64.encode64(request).gsub(/\n/, "")
+        # The original request received from Azure AD comes with downcased
+        # encoded characters, like %2f instead of %2F, and the signature they
+        # send is based on this base64 request.
+        params = {
+          'SAMLRequest' => downcased_escape(base64_request),
+          'SigAlg' => downcased_escape(settings.security[:signature_method]),
+        }
+        # Assemble query string.
+        query = "SAMLRequest=#{params['SAMLRequest']}&SigAlg=#{params['SigAlg']}"
+        # Make normalised signature based on our modified params.
+        sign_algorithm = XMLSecurity::BaseDocument.new.algorithm(
+          settings.security[:signature_method]
+        )
+        signature = settings.get_sp_signing_key.sign(sign_algorithm.new, query)
+        params['Signature'] = downcased_escape(Base64.encode64(signature).gsub(/\n/, ""))
+
+        # Then parameters are usually unescaped, like we manage them in rails
+        params = params.map { |k, v| [k, CGI.unescape(v)] }.to_h
+        # Construct SloLogoutrequest and ask it to validate the signature.
+        # It will fail because the signature is based on the downcased request
+        logout_request_downcased_test = OneLogin::RubySaml::SloLogoutrequest.new(
+          params['SAMLRequest'], get_params: params, settings: settings,
+        )
+        assert_raises(OneLogin::RubySaml::ValidationError, "Invalid Signature on Logout Request") do
+          logout_request_downcased_test.send(:validate_signature)
+        end
+
+        # For this case, the parameters will be forced to be downcased after
+        # being escaped with :lowercase_url_encoding security option
+        settings.security[:lowercase_url_encoding] = true
+        logout_request_force_downcasing_test = OneLogin::RubySaml::SloLogoutrequest.new(
+          params['SAMLRequest'], get_params: params, settings: settings
+        )
+        assert logout_request_force_downcasing_test.send(:validate_signature)
+      end
     end
 
     describe "#validate_signature with multiple idp certs" do
@@ -408,7 +506,6 @@ class RubySamlTest < Minitest::Test
         settings.private_key = ruby_saml_key_text
         settings.idp_cert = nil
         settings.security[:logout_requests_signed] = true
-        settings.security[:embed_sign] = false
         settings.security[:signature_method] = XMLSecurity::Document::RSA_SHA1
       end
 
@@ -457,7 +554,6 @@ class RubySamlTest < Minitest::Test
         logout_request_sign_test.settings = settings
         assert !logout_request_sign_test.send(:validate_signature)
         assert_includes logout_request_sign_test.errors, "Invalid Signature on Logout Request"
-
       end
     end
   end

@@ -1,7 +1,10 @@
 require 'simplecov'
-require 'coveralls'
+require 'simplecov-lcov'
 
-SimpleCov.formatter = Coveralls::SimpleCov::Formatter
+SimpleCov::Formatter::LcovFormatter.config.report_with_single_file = true
+SimpleCov::Formatter::LcovFormatter.config.output_directory = 'coverage'
+SimpleCov::Formatter::LcovFormatter.config.lcov_file_name = 'lcov.info'
+SimpleCov.formatter = SimpleCov::Formatter::LcovFormatter
 SimpleCov.start do
   add_filter "test/"
   add_filter "vendor/"
@@ -14,6 +17,7 @@ require 'bundler'
 require 'minitest/autorun'
 require 'mocha/setup'
 require 'timecop'
+Dir[File.expand_path('../helpers/**/*.rb', __FILE__)].each { |f| require f }
 
 Bundler.require :default, :test
 
@@ -26,6 +30,22 @@ TEST_LOGGER = Logger.new(StringIO.new)
 OneLogin::RubySaml::Logging.logger = TEST_LOGGER
 
 class Minitest::Test
+  def self.jruby?
+    defined?(RUBY_ENGINE) && RUBY_ENGINE == 'jruby'
+  end
+
+  def jruby?
+    self.class.jruby?
+  end
+
+  def self.truffleruby?
+    defined?(RUBY_ENGINE) && RUBY_ENGINE == 'truffleruby'
+  end
+
+  def truffleruby?
+    self.class.truffleruby?
+  end
+
   def fixture(document, base64 = true)
     response = Dir.glob(File.join(File.dirname(__FILE__), "responses", "#{document}*")).first
     if base64 && response =~ /\.xml$/
@@ -61,6 +81,10 @@ class Minitest::Test
 
   def response_document_without_recipient
     @response_document_without_recipient ||= read_response("response_with_undefined_recipient.xml.base64")
+  end
+
+  def signed_response_document_without_recipient
+    @signed_response_document_without_recipient ||= read_response("signed_response_with_undefined_recipient.xml.base64")
   end
 
   def response_document_without_recipient_with_time_updated
@@ -234,6 +258,15 @@ class Minitest::Test
     @logout_request_document_with_name_id_format
   end
 
+  def logout_request_encrypted_nameid_document
+    unless @logout_request_encrypted_nameid_document
+      xml = read_logout_request("slo_request_encrypted_nameid.xml")
+      deflated = Zlib::Deflate.deflate(xml, 9)[2..-5]
+      @logout_request_encrypted_nameid_document = Base64.encode64(deflated)
+    end
+    @logout_request_encrypted_nameid_document
+  end
+
   def logout_request_xml_with_session_index
     @logout_request_xml_with_session_index ||= File.read(File.join(File.dirname(__FILE__), 'logout_requests', 'slo_request_with_session_index.xml'))
   end
@@ -346,4 +379,24 @@ class Minitest::Test
       end
     end
   end
+
+  # Allows to emulate Azure AD request behavior
+  def downcased_escape(str)
+    CGI.escape(str).gsub(/%[A-Fa-f0-9]{2}/) { |match| match.downcase }
+  end
+end
+
+# Remove after https://github.com/jruby/jruby/issues/6613 is fixed
+if Minitest::Test.jruby?
+  module JRubyZlibTestExtension
+    def capture_exceptions
+      super
+
+      if failures && failures.reject! { |e| e.error && e.error.is_a?(Zlib::BufError) } # nil if nothing rejected
+        failures << Minitest::Skip.new('Skipping Zlib::BufError in JRuby. See: https://github.com/jruby/jruby/issues/6613')
+      end
+    end
+  end
+
+  Minitest::Test.prepend(JRubyZlibTestExtension)
 end

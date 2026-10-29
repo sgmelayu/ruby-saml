@@ -13,7 +13,7 @@ module OneLogin
     class SloLogoutresponse < SamlMessage
 
       # Logout Response ID
-      attr_reader :uuid
+      attr_accessor :uuid
 
       # Initializes the Logout Response. A SloLogoutresponse Object that is an extension of the SamlMessage class.
       # Asigns an ID, a random uuid.
@@ -30,7 +30,7 @@ module OneLogin
       # @param settings [OneLogin::RubySaml::Settings|nil] Toolkit settings
       # @param request_id [String] The ID of the LogoutRequest sent by this SP to the IdP. That ID will be placed as the InResponseTo in the logout response
       # @param logout_message [String] The Message to be placed as StatusMessage in the logout response
-      # @param params [Hash] Some extra parameters to be added in the GET for example the RelayState
+      # @param params [Hash] Some extra parameters to be added in the GET for example, the RelayState
       # @param logout_status_code [String] The StatusCode to be placed as StatusMessage in the logout response
       # @return [String] Logout Request string that includes the SAMLRequest
       #
@@ -41,7 +41,7 @@ module OneLogin
         saml_response = CGI.escape(params.delete("SAMLResponse"))
         response_params = "#{params_prefix}SAMLResponse=#{saml_response}"
         params.each_pair do |key, value|
-          response_params << "&#{key.to_s}=#{CGI.escape(value.to_s)}"
+          response_params << "&#{key}=#{CGI.escape(value.to_s)}"
         end
 
         raise SettingError.new "Invalid settings, idp_slo_service_url is not set!" if url.nil? or url.empty?
@@ -52,7 +52,7 @@ module OneLogin
       # @param settings [OneLogin::RubySaml::Settings|nil] Toolkit settings
       # @param request_id [String] The ID of the LogoutRequest sent by this SP to the IdP. That ID will be placed as the InResponseTo in the logout response
       # @param logout_message [String] The Message to be placed as StatusMessage in the logout response
-      # @param params [Hash] Some extra parameters to be added in the GET for example the RelayState
+      # @param params [Hash] Some extra parameters to be added in the GET for example, the RelayState
       # @param logout_status_code [String] The StatusCode to be placed as StatusMessage in the logout response
       # @return [Hash] Parameters
       #
@@ -70,7 +70,7 @@ module OneLogin
         response_doc = create_logout_response_xml_doc(settings, request_id, logout_message, logout_status_code)
         response_doc.context[:attribute_quote] = :quote if settings.double_quote_xml_attribute_values
 
-        response = ""
+        response = "".dup
         response_doc.write(response)
 
         Logging.debug "Created SLO Logout Response: #{response}"
@@ -78,9 +78,10 @@ module OneLogin
         response = deflate(response) if settings.compress_response
         base64_response = encode(response)
         response_params = {"SAMLResponse" => base64_response}
+        sp_signing_key = settings.get_sp_signing_key
 
-        if settings.security[:logout_responses_signed] && !settings.security[:embed_sign] && settings.private_key
-          params['SigAlg']    = settings.security[:signature_method]
+        if settings.idp_slo_service_binding == Utils::BINDINGS[:redirect] && settings.security[:logout_responses_signed] && sp_signing_key
+          params['SigAlg'] = settings.security[:signature_method]
           url_string = OneLogin::RubySaml::Utils.build_query(
             :type => 'SAMLResponse',
             :data => base64_response,
@@ -88,7 +89,7 @@ module OneLogin
             :sig_alg => params['SigAlg']
           )
           sign_algorithm = XMLSecurity::BaseDocument.new.algorithm(settings.security[:signature_method])
-          signature = settings.get_sp_key.sign(sign_algorithm.new, url_string)
+          signature = sp_signing_key.sign(sign_algorithm.new, url_string)
           params['Signature'] = encode(signature)
         end
 
@@ -150,9 +151,8 @@ module OneLogin
 
       def sign_document(document, settings)
         # embed signature
-        if settings.security[:logout_responses_signed] && settings.private_key && settings.certificate && settings.security[:embed_sign]
-          private_key = settings.get_sp_key
-          cert = settings.get_sp_cert
+        cert, private_key = settings.get_sp_signing_pair
+        if settings.idp_slo_service_binding == Utils::BINDINGS[:post] && private_key && cert
           document.sign_document(private_key, cert, settings.security[:signature_method], settings.security[:digest_method])
         end
 

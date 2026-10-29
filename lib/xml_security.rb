@@ -42,6 +42,36 @@ module XMLSecurity
     NOKOGIRI_OPTIONS = Nokogiri::XML::ParseOptions::STRICT |
                        Nokogiri::XML::ParseOptions::NONET
 
+    # Safety load the SAML Message XML
+    # @param document [REXML::Document] The message to be loaded
+    # @param check_malformed_doc [Boolean] check_malformed_doc Enable or Disable the check for malformed XML
+    # @return [Nokogiri::XML] The nokogiri document
+    # @raise [ValidationError] If there was a problem loading the SAML Message XML
+    def self.safe_load_xml(document, check_malformed_doc = true)
+      doc_str = document.to_s
+      if doc_str.include?("<!DOCTYPE")
+       raise StandardError.new("Dangerous XML detected. No Doctype nodes allowed")
+      end
+
+      begin
+        xml = Nokogiri::XML(doc_str) do |config|
+          config.options = self::NOKOGIRI_OPTIONS
+        end
+      rescue StandardError => error
+        raise StandardError.new(error.message)
+      end
+
+      if xml.internal_subset
+        raise StandardError.new("Dangerous XML detected. No Doctype nodes allowed")
+      end
+
+      unless xml.errors.empty?
+        raise StandardError.new("There were XML errors when parsing: #{xml.errors}") if check_malformed_doc
+      end
+
+      xml
+    end
+
     def canon_algorithm(element)
       algorithm = element
       if algorithm.is_a?(REXML::Element)
@@ -114,10 +144,8 @@ module XMLSecurity
       #<KeyInfo />
       #<Object />
     #</Signature>
-    def sign_document(private_key, certificate, signature_method = RSA_SHA1, digest_method = SHA1)
-      noko = Nokogiri::XML(self.to_s) do |config|
-        config.options = XMLSecurity::BaseDocument::NOKOGIRI_OPTIONS
-      end
+    def sign_document(private_key, certificate, signature_method = RSA_SHA1, digest_method = SHA1, check_malformed_doc = true)
+      noko = XMLSecurity::BaseDocument.safe_load_xml(self.to_s, check_malformed_doc)
 
       signature_element = REXML::Element.new("ds:Signature").add_namespace('ds', DSIG)
       signed_info_element = signature_element.add_element("ds:SignedInfo")
@@ -139,9 +167,7 @@ module XMLSecurity
       reference_element.add_element("ds:DigestValue").text = compute_digest(canon_doc, algorithm(digest_method_element))
 
       # add SignatureValue
-      noko_sig_element = Nokogiri::XML(signature_element.to_s) do |config|
-        config.options = XMLSecurity::BaseDocument::NOKOGIRI_OPTIONS
-      end
+      noko_sig_element = XMLSecurity::BaseDocument.safe_load_xml(signature_element.to_s, check_malformed_doc)
 
       noko_signed_info_element = noko_sig_element.at_xpath('//ds:Signature/ds:SignedInfo', 'ds' => DSIG)
       canon_string = noko_signed_info_element.canonicalize(canon_algorithm(C14N))
@@ -159,15 +185,14 @@ module XMLSecurity
       x509_cert_element.text = Base64.encode64(certificate.to_der).gsub(/\n/, "")
 
       # add the signature
-      issuer_element = self.elements["//saml:Issuer"]
-      if issuer_element
-        self.root.insert_after issuer_element, signature_element
+      if issuer_element = elements["//saml:Issuer"]
+        root.insert_after(issuer_element, signature_element)
+      elsif issuer_element = elements["//saml2:Issuer"]
+        root.insert_after(issuer_element, signature_element)
+      elsif first_child = root.children[0]
+        root.insert_before(first_child, signature_element)
       else
-        if sp_sso_descriptor = self.elements["/md:EntityDescriptor"]
-          self.root.insert_before sp_sso_descriptor, signature_element
-        else
-          self.root.add_element(signature_element)
-        end
+        root.add_element(signature_element)
       end
     end
 
@@ -179,7 +204,7 @@ module XMLSecurity
 
     def compute_digest(document, digest_algorithm)
       digest = digest_algorithm.digest(document)
-      Base64.encode64(digest).strip!
+      Base64.encode64(digest).strip
     end
 
   end
@@ -192,12 +217,31 @@ module XMLSecurity
     def initialize(response, errors = [])
       super(response)
       @errors = errors
+      reset_elements
+    end
+
+    def reset_elements
+      @referenced_xml = nil
+      @cached_signed_info = nil
+      @signature = nil
+      @signature_algorithm = nil
+      @ref = nil
+      @processed = false
+    end
+
+    def processed
+      @processed
+    end
+
+    def referenced_xml
+      @referenced_xml
     end
 
     def signed_element_id
       @signed_element_id ||= extract_signed_element_id
     end
 
+    # Validates the referenced_xml, which is the signed part of the document
     def validate_document(idp_cert_fingerprint, soft = true, options = {})
       # get cert from response
       cert_element = REXML::XPath.first(
@@ -218,7 +262,7 @@ module XMLSecurity
         if options[:fingerprint_alg]
           fingerprint_alg = XMLSecurity::BaseDocument.new.algorithm(options[:fingerprint_alg]).new
         else
-          fingerprint_alg = OpenSSL::Digest::SHA1.new
+          fingerprint_alg = OpenSSL::Digest.new('SHA1')
         end
         fingerprint = fingerprint_alg.hexdigest(cert.to_der)
 
@@ -226,6 +270,7 @@ module XMLSecurity
         if fingerprint != idp_cert_fingerprint.gsub(/[^a-zA-Z0-9]/,"").downcase
           return append_error("Fingerprint mismatch", soft)
         end
+        base64_cert = Base64.encode64(cert.to_der)
       else
         if options[:cert]
           base64_cert = Base64.encode64(options[:cert].to_pem)
@@ -261,16 +306,22 @@ module XMLSecurity
         if idp_cert.to_pem != cert.to_pem
           return append_error("Certificate of the Signature element does not match provided certificate", soft)
         end
-      else
-        base64_cert = Base64.encode64(idp_cert.to_pem)
       end
-      validate_signature(base64_cert, true)
+
+      encoded_idp_cert = Base64.encode64(idp_cert.to_pem)
+      validate_signature(encoded_idp_cert, true)
     end
 
-    def validate_signature(base64_cert, soft = true)
+    def cache_referenced_xml(soft, check_malformed_doc = true)
+      reset_elements
+      @processed = true
 
-      document = Nokogiri::XML(self.to_s) do |config|
-        config.options = XMLSecurity::BaseDocument::NOKOGIRI_OPTIONS
+      begin
+        nokogiri_document = XMLSecurity::BaseDocument.safe_load_xml(self, check_malformed_doc)
+      rescue StandardError => error
+        @errors << error.message
+        return false if soft
+        raise ValidationError.new("XML load failed: #{error.message}")
       end
 
       # create a rexml document
@@ -283,13 +334,15 @@ module XMLSecurity
           {"ds"=>DSIG}
       )
 
+      return if sig_element.nil?
+
       # signature method
       sig_alg_value = REXML::XPath.first(
         sig_element,
         "./ds:SignedInfo/ds:SignatureMethod",
         {"ds"=>DSIG}
       )
-      signature_algorithm = algorithm(sig_alg_value)
+      @signature_algorithm = algorithm(sig_alg_value)
 
       # get signature
       base64_signature = REXML::XPath.first(
@@ -297,7 +350,11 @@ module XMLSecurity
         "./ds:SignatureValue",
         {"ds" => DSIG}
       )
-      signature = Base64.decode64(OneLogin::RubySaml::Utils.element_text(base64_signature))
+
+      return if base64_signature.nil?
+
+      base64_signature_text = OneLogin::RubySaml::Utils.element_text(base64_signature)
+      @signature = base64_signature_text.nil? ? nil : Base64.decode64(base64_signature_text)
 
       # canonicalization method
       canon_algorithm = canon_algorithm REXML::XPath.first(
@@ -306,53 +363,75 @@ module XMLSecurity
         'ds' => DSIG
       )
 
-      noko_sig_element = document.at_xpath('//ds:Signature', 'ds' => DSIG)
+      noko_sig_element = nokogiri_document.at_xpath('//ds:Signature', 'ds' => DSIG)
       noko_signed_info_element = noko_sig_element.at_xpath('./ds:SignedInfo', 'ds' => DSIG)
 
-      canon_string = noko_signed_info_element.canonicalize(canon_algorithm)
+      @cached_signed_info = noko_signed_info_element.canonicalize(canon_algorithm)
+
+      ### Now get the @referenced_xml to use?
+      rexml_signed_info = REXML::Document.new(@cached_signed_info.to_s).root
+
       noko_sig_element.remove
 
       # get inclusive namespaces
       inclusive_namespaces = extract_inclusive_namespaces
 
       # check digests
-      ref = REXML::XPath.first(sig_element, "//ds:Reference", {"ds"=>DSIG})
+      @ref = REXML::XPath.first(rexml_signed_info, "./ds:Reference", {"ds"=>DSIG})
+      return if @ref.nil?
 
-      hashed_element = document.at_xpath("//*[@ID=$id]", nil, { 'id' => extract_signed_element_id })
+      reference_nodes = nokogiri_document.xpath("//*[@ID=$id]", nil, { 'id' => extract_signed_element_id })
+
+      hashed_element = reference_nodes[0]
+      return if hashed_element.nil?
 
       canon_algorithm = canon_algorithm REXML::XPath.first(
-        ref,
-        '//ds:CanonicalizationMethod',
+        rexml_signed_info,
+        './ds:CanonicalizationMethod',
         { "ds" => DSIG }
       )
 
-      canon_algorithm = process_transforms(ref, canon_algorithm)
+      canon_algorithm = process_transforms(@ref, canon_algorithm)
 
-      canon_hashed_element = hashed_element.canonicalize(canon_algorithm, inclusive_namespaces)
+      @referenced_xml = hashed_element.canonicalize(canon_algorithm, inclusive_namespaces)
+    end
 
-      digest_algorithm = algorithm(REXML::XPath.first(
-        ref,
-        "//ds:DigestMethod",
-        { "ds" => DSIG }
-      ))
-      hash = digest_algorithm.digest(canon_hashed_element)
-      encoded_digest_value = REXML::XPath.first(
-        ref,
-        "//ds:DigestValue",
-        { "ds" => DSIG }
-      )
-      digest_value = Base64.decode64(OneLogin::RubySaml::Utils.element_text(encoded_digest_value))
-
-      unless digests_match?(hash, digest_value)
-        return append_error("Digest mismatch", soft)
+    def validate_signature(base64_cert, soft = true)
+      if !@processed
+        cache_referenced_xml(soft)
       end
+
+      return append_error("No Signature Algorithm Method found", soft) if @signature_algorithm.nil?  
+      return append_error("No Signature node found", soft) if @signature.nil?  
+      return append_error("No canonized SignedInfo ", soft) if @cached_signed_info.nil?
+      return append_error("No Reference node found", soft) if @ref.nil?
+      return append_error("No referenced XML", soft) if @referenced_xml.nil?
 
       # get certificate object
       cert_text = Base64.decode64(base64_cert)
       cert = OpenSSL::X509::Certificate.new(cert_text)
 
+      digest_algorithm = algorithm(REXML::XPath.first(
+        @ref,
+        "./ds:DigestMethod",
+        { "ds" => DSIG }
+      ))
+      hash = digest_algorithm.digest(@referenced_xml)
+      encoded_digest_value = REXML::XPath.first(
+        @ref,
+        "./ds:DigestValue",
+        { "ds" => DSIG }
+      )
+      encoded_digest_value_text = OneLogin::RubySaml::Utils.element_text(encoded_digest_value)
+      digest_value = encoded_digest_value_text.nil? ? nil : Base64.decode64(encoded_digest_value_text)
+
+      # Compare the computed "hash" with the "signed" hash
+      unless hash && hash == digest_value
+        return append_error("Digest mismatch", soft)
+      end
+
       # verify signature
-      unless cert.public_key.verify(signature_algorithm.new, signature, canon_string)
+      unless cert.public_key.verify(@signature_algorithm.new, @signature, @cached_signed_info)
         return append_error("Key validation error", soft)
       end
 
@@ -364,7 +443,7 @@ module XMLSecurity
     def process_transforms(ref, canon_algorithm)
       transforms = REXML::XPath.match(
         ref,
-        "//ds:Transforms/ds:Transform",
+        "./ds:Transforms/ds:Transform",
         { "ds" => DSIG }
       )
 
